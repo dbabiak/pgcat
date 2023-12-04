@@ -4,6 +4,7 @@ use super::{ClientState, ServerState};
 use crate::{config::PoolMode, messages::DataType, pool::PoolIdentifier};
 use std::collections::HashMap;
 use std::sync::atomic::*;
+use tokio::time::Instant;
 
 use crate::pool::get_all_pools;
 
@@ -62,10 +63,14 @@ impl PoolStats {
                     match client.state.load(Ordering::Relaxed) {
                         ClientState::Active => pool_stats.cl_active += 1,
                         ClientState::Idle => pool_stats.cl_idle += 1,
-                        ClientState::Waiting => pool_stats.cl_waiting += 1,
+                        ClientState::Waiting => {
+                            pool_stats.cl_waiting += 1;
+                            let wait_start = client.wait_start.load();
+                            let duration =  Instant::now().duration_since(wait_start);
+                            // safe to truncate, we only lose info if duration is greater than ~585,000 years
+                            pool_stats.maxwait = std::cmp::max(pool_stats.maxwait, duration.as_micros() as u64);
+                        },
                     }
-                    let max_wait = client.max_wait_time.load(Ordering::Relaxed);
-                    pool_stats.maxwait = std::cmp::max(pool_stats.maxwait, max_wait);
                 }
                 None => debug!("Client from an obselete pool"),
             }

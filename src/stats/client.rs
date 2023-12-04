@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use super::{get_reporter, Reporter};
 use atomic_enum::atomic_enum;
 use std::sync::atomic::*;
@@ -21,6 +22,27 @@ impl std::fmt::Display for ClientState {
     }
 }
 
+#[derive(Debug)]
+pub struct AtomicInstant {
+    inner: Mutex<Instant>,
+}
+
+impl AtomicInstant {
+    pub fn new(instant: Instant) -> AtomicInstant {
+        AtomicInstant {
+            inner: Mutex::new(instant),
+        }
+    }
+
+    pub fn load(&self) -> Instant {
+        *self.inner.lock().unwrap()
+    }
+
+    pub fn store(&self, instant: Instant) {
+        *self.inner.lock().unwrap() = instant;
+    }
+}
+
 #[derive(Debug, Clone)]
 /// Information we keep track of which can be queried by SHOW CLIENTS
 pub struct ClientStats {
@@ -39,7 +61,10 @@ pub struct ClientStats {
     pub total_wait_time: Arc<AtomicU64>,
 
     /// Maximum time spent waiting for a connection from pool, measures in microseconds
-    pub max_wait_time: Arc<AtomicU64>,
+    pub wait_time: Arc<AtomicU64>,
+
+    /// When this client started waiting
+    pub wait_start: Arc<AtomicInstant>,
 
     /// Current state of the client
     pub state: Arc<AtomicClientState>,
@@ -63,7 +88,8 @@ impl Default for ClientStats {
             username: String::new(),
             pool_name: String::new(),
             total_wait_time: Arc::new(AtomicU64::new(0)),
-            max_wait_time: Arc::new(AtomicU64::new(0)),
+            wait_time: Arc::new(AtomicU64::new(0)),
+            wait_start: Arc::new(AtomicInstant { inner: Mutex::new(Instant::now()) }),
             state: Arc::new(AtomicClientState::new(ClientState::Idle)),
             transaction_count: Arc::new(AtomicU64::new(0)),
             query_count: Arc::new(AtomicU64::new(0)),
@@ -111,6 +137,7 @@ impl ClientStats {
 
     /// Reports a client is waiting for a connection
     pub fn waiting(&self) {
+        self.wait_start.store(Instant::now());
         self.state.store(ClientState::Waiting, Ordering::Relaxed);
     }
 
@@ -134,8 +161,8 @@ impl ClientStats {
     pub fn checkout_time(&self, microseconds: u64) {
         self.total_wait_time
             .fetch_add(microseconds, Ordering::Relaxed);
-        self.max_wait_time
-            .fetch_max(microseconds, Ordering::Relaxed);
+        self.wait_time
+            .store(microseconds, Ordering::Relaxed);
     }
 
     /// Report a query executed by a client against a server
